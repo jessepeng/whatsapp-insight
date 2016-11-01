@@ -1,19 +1,28 @@
 package de.jessepeng.WhatsappInsights;
 
+import org.apache.flink.api.common.operators.Order;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.io.TextValueInputFormat;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.tuple.Tuple5;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.types.StringValue;
 
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.MathContext;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.StringTokenizer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -35,6 +44,10 @@ public class Main {
     private static final String COMMAND_WORT = "wort";
     private static final String COMMAND_WORT_NUTZER = "wortNutzer";
     private static final String COMMAND_WORT_NUTZER_DATUM = "wortNutzerDatum";
+    public static final String COMMAND_WORT_ANZAHL_DURCHSCHNITT = "wortAnzahlDurchschnitt";
+    public static final String DELIM = " \t\n\r\f.,:;-!?\"'()“”";
+    public static final String COMMAND_NACHRICHTEN_ABSTAND = "nachrichtenAbstand";
+    public static final String COMMAND_NACHRICHTEN_PRO_TAG = "nachrichtenProTag";
 
     public static void main(String[] args) throws Exception {
         ParameterTool parameter = ParameterTool.fromArgs(args);
@@ -73,6 +86,7 @@ public class Main {
         });
 
         DataSet<?> resultDataset;
+        label:
         switch (command) {
             case COMMAND_HAEUFIGKEIT:
                 resultDataset = nachrichten.map((tuple) -> new Tuple2<>(tuple.f1, 1)).groupBy(0).sum(1);
@@ -83,19 +97,74 @@ public class Main {
                 String wort = parameter.get("wort");
                 DataSet<Tuple3<String, String, Date>> alleWoerter = nachrichten.flatMap((tuple, out) -> {
                     if (tuple.f3 == NachrichtenTyp.TEXT) {
-                        StringTokenizer tokenizer = new StringTokenizer(tuple.f2, " \t\n\r\f.,:;-!?\"'()“”");
+                        StringTokenizer tokenizer = new StringTokenizer(tuple.f2, DELIM);
                         while (tokenizer.hasMoreTokens()) {
                             out.collect(new Tuple3<String, String, Date>(tokenizer.nextToken().toLowerCase(), tuple.f1, tuple.f0));
                         }
                     }
                 });
-                DataSet<Tuple2<String, Integer>> anzahlWoerter = alleWoerter.map((tuple) -> new Tuple2<>(tuple.f0, 1)).groupBy(0).sum(1);
-                if (wort == null) {
-                    resultDataset = anzahlWoerter;
-                } else {
-                    Pattern wortPattern = Pattern.compile(wort);
-                    resultDataset = anzahlWoerter.filter((tuple) -> wortPattern.matcher(tuple.f0).matches());
+                switch (command) {
+                    case COMMAND_WORT:
+                        DataSet<Tuple2<String, Integer>> anzahlWoerter = alleWoerter.map((tuple) -> new Tuple2<>(tuple.f0, 1)).groupBy(0).sum(1);
+                        if (wort == null) {
+                            resultDataset = anzahlWoerter;
+                        } else {
+                            Pattern wortPattern = Pattern.compile(wort);
+                            resultDataset = anzahlWoerter.filter((tuple) -> wortPattern.matcher(tuple.f0).matches());
+                        }
+                        break label;
+                    case COMMAND_WORT_NUTZER:
+                        DataSet<Tuple3<String, String, Integer>> woerterProNutzer = alleWoerter.map((tuple) -> new Tuple3<String, String, Integer>(tuple.f0, tuple.f1, 1));
+                        Pattern wortPattern = Pattern.compile(wort);
+                        resultDataset = woerterProNutzer.groupBy(0, 1).sum(2).filter((tuple) -> wortPattern.matcher(tuple.f0).matches());
+                        break;
+                    default:
+                        return;
                 }
+                break;
+            case COMMAND_WORT_ANZAHL_DURCHSCHNITT:
+                DataSet<Tuple2<String, List<String>>> wortListe = nachrichten.flatMap((tuple, out) -> {
+                    if (tuple.f3 == NachrichtenTyp.TEXT) {
+                        List<String> woerter = new ArrayList<String>();
+                        StringTokenizer tokenizer = new StringTokenizer(tuple.f2, DELIM);
+                        while (tokenizer.hasMoreTokens()) {
+                            woerter.add(tokenizer.nextToken());
+                        }
+                        out.collect(new Tuple2<String, List<String>>(tuple.f1, woerter));
+                    }
+                });
+
+                DataSet<Tuple3<String, Integer, Integer>> nachrichtenLaenge = wortListe.map((tuple) -> new Tuple3<String, Integer, Integer>(tuple.f0, tuple.f1.size(), 1));
+                resultDataset = nachrichtenLaenge
+                        .groupBy(0)
+                        .reduce((tuple1, tuple2) -> new Tuple3<String, Integer, Integer>(tuple1.f0, tuple1.f1 + tuple2.f1, tuple1.f2 + tuple2.f2))
+                        .map(tuple -> new Tuple2<String, Double>(tuple.f0, new BigDecimal(((double) tuple.f1 / tuple.f2)).round(new MathContext(4)).doubleValue()));
+                break;
+            case COMMAND_NACHRICHTEN_ABSTAND:
+                DataSet<Tuple3<String, Long, Long>> nachrichtenAbstaende = nachrichten.groupBy(1).sortGroup(0, Order.ASCENDING).reduceGroup((values, out) -> {
+                    Tuple4<Date, String, String, NachrichtenTyp> previousTuple = null;
+                    for (Tuple4<Date, String, String, NachrichtenTyp> tuple: values) {
+                        if (previousTuple != null) {
+                            LocalDateTime previousTime = LocalDateTime.ofInstant(previousTuple.f0.toInstant(), ZoneId.systemDefault());
+                            LocalDateTime currentTime = LocalDateTime.ofInstant(tuple.f0.toInstant(), ZoneId.systemDefault());
+                            Duration duration = Duration.between(previousTime, currentTime);
+                            out.collect(new Tuple3<String, Long, Long>(tuple.f1, duration.getSeconds(), 1L));
+                        }
+                        previousTuple = tuple;
+                    }
+                });
+
+                resultDataset = nachrichtenAbstaende.groupBy(0).reduce((tuple1, tuple2) -> new Tuple3<String, Long, Long>(
+                        tuple1.f0,
+                        tuple1.f1 + tuple2.f1,
+                        tuple1.f2 + tuple2.f2))
+                .map(tuple -> new Tuple2<String, Double>(tuple.f0, new BigDecimal(((double) tuple.f1 / tuple.f2 / 60)).round(new MathContext(4)).doubleValue()));
+                break;
+            case COMMAND_NACHRICHTEN_PRO_TAG:
+                resultDataset = nachrichten.map(tuple -> {
+                    SimpleDateFormat dateFormat = new SimpleDateFormat("ddMMYYYY");
+                    return new Tuple2<String, Integer>(dateFormat.format(tuple.f0), 1);
+                }).groupBy(0).sum(1).sortPartition(1, Order.DESCENDING);
                 break;
             default:
                 System.out.println("Befehl nicht erkannt.");
