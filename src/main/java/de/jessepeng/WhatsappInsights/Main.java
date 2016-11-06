@@ -3,6 +3,7 @@ package de.jessepeng.WhatsappInsights;
 import org.apache.flink.api.common.operators.Order;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.io.CsvOutputFormat;
 import org.apache.flink.api.java.io.TextValueInputFormat;
 import org.apache.flink.api.java.tuple.*;
 import org.apache.flink.api.java.utils.ParameterTool;
@@ -14,6 +15,8 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.text.DateFormat;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -31,9 +34,9 @@ public class Main {
     private static final Pattern NACHRICHT_PATTERN = Pattern.compile("(.*?): (.*?): (.*?)", Pattern.DOTALL);
     private static final Pattern NACHRICHT_PATTERN_ONE_LINE = Pattern.compile("^(.*?): (.*?): (.*?)$");
 
-    private static final String BILD_NACHRICHT = "<Bild weggelassen>";
-    private static final String AUDIO_NACHRICHT = "<Audio weggelassen>";
-    private static final String VIDEO_NACHRICHT = "<Video weggelassen>";
+    private static final String BILD_NACHRICHT = "<\u200EBild weggelassen>";
+    private static final String AUDIO_NACHRICHT = "<\u200EAudio weggelassen>";
+    private static final String VIDEO_NACHRICHT = "<\u200EVideo weggelassen>";
 
     private static final String COMMAND_HAEUFIGKEIT = "haeufigkeit";
     private static final String COMMAND_WORT = "wort";
@@ -46,6 +49,8 @@ public class Main {
     public static final String COMMAND_WORT_DURCHSCHNITT_STUNDE = "wortDurchschnittStunde";
     public static final String COMMAND_WORT_DURCHSCHNITT_TAG = "wortDurchschnittTag";
     public static final String COMMAND_WORT_DURCHSCHNITT_SENDER = "wortDurchschnittSender";
+    public static final String COMMAND_HAEUFIGKEIT_TYP = "haeufigkeitTyp";
+    public static final String COMMAND_NACHRICHTEN_TREND = "nachrichtenTrend";
 
     public static void main(String[] args) throws Exception {
         ParameterTool parameter = ParameterTool.fromArgs(args);
@@ -97,6 +102,45 @@ public class Main {
         switch (command) {
             case COMMAND_HAEUFIGKEIT:
                 resultDataset = nachrichten.map((tuple) -> new Tuple2<>(tuple.f1, 1)).groupBy(0).sum(1);
+                break;
+            case COMMAND_HAEUFIGKEIT_TYP:
+                resultDataset = nachrichten
+                        .map(tuple -> new Tuple3<>(tuple.f1, tuple.f3, 1))
+                        .groupBy(0, 1)
+                        .sum(2);
+                break;
+            case COMMAND_NACHRICHTEN_TREND:
+                String name;
+                if ((name = parameter.get("name")) != null) {
+                    nachrichten = nachrichten.filter(tuple -> tuple.f1.contains(name));
+                }
+                DataSet<Tuple4<Date, String, Integer, String>> nachrichtenProMonat = nachrichten
+                        .map(tuple -> {
+                            DateFormat dateFormat = new SimpleDateFormat("MMyy");
+                            return new Tuple4<>(tuple.f0, tuple.f1, 1, dateFormat.format(tuple.f0));
+                        })
+                        .groupBy(1, 3).sum(2);
+                resultDataset = nachrichtenProMonat
+                        .rightOuterJoin(nachrichtenProMonat)
+                        .where(tuple -> {
+                            Calendar calendar = new GregorianCalendar();
+                            calendar.setTime(tuple.f0);
+                            return tuple.f1 + String.valueOf(calendar.get(Calendar.MONTH)) + String.valueOf(calendar.get(Calendar.YEAR));
+                        }).equalTo(tuple -> {
+                            Calendar calendar = new GregorianCalendar();
+                            calendar.setTime(tuple.f0);
+                            calendar.add(Calendar.MONTH, -1);
+                            return tuple.f1 + String.valueOf(calendar.get(Calendar.MONTH)) + String.valueOf(calendar.get(Calendar.YEAR));
+                        }).with((tuple1, tuple2) -> {
+                            DateFormat dateFormat = new SimpleDateFormat("MMyy");
+                            double growth = 0.0;
+                            if (tuple1 != null) {
+                                growth = (double)tuple2.f2 / tuple1.f2;
+                                growth = -(1 - growth);
+                            }
+                            return new Tuple5<Date, String, String, Integer, String>(tuple2.f0, tuple2.f1, dateFormat.format(tuple2.f0), tuple2.f2, formatDouble(growth, 4));
+                        }).sortPartition(1, Order.ASCENDING).sortPartition(0, Order.ASCENDING)
+                        .project(1, 2, 3, 4);
                 break;
             case COMMAND_WORT:
             case COMMAND_WORT_NUTZER:
@@ -232,7 +276,7 @@ public class Main {
 
         env.setParallelism(1);
         if (parameter.get("format", "txt").equalsIgnoreCase("csv")) {
-            resultDataset.writeAsCsv(ausgabe, FileSystem.WriteMode.OVERWRITE);
+            resultDataset.writeAsCsv(ausgabe, CsvOutputFormat.DEFAULT_LINE_DELIMITER, ";", FileSystem.WriteMode.OVERWRITE);
         } else {
             resultDataset.writeAsText(ausgabe, FileSystem.WriteMode.OVERWRITE);
         }
@@ -273,5 +317,15 @@ public class Main {
                 }
             }
         }
+    }
+
+    private static String formatDouble(double value, int kommaStellen) {
+        NumberFormat nf = NumberFormat.getNumberInstance(Locale.GERMAN);
+        DecimalFormat df = (DecimalFormat)nf;
+        df.setMinimumFractionDigits(0);
+        df.setMaximumFractionDigits(kommaStellen);
+        df.setMinimumIntegerDigits(1);
+        df.setGroupingSize(3);
+        return df.format(new BigDecimal(value));
     }
 }
