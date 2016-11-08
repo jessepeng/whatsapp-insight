@@ -3,6 +3,7 @@ package de.jessepeng.WhatsappInsights;
 import org.apache.flink.api.common.operators.Order;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.aggregation.Aggregations;
 import org.apache.flink.api.java.io.CsvOutputFormat;
 import org.apache.flink.api.java.io.TextValueInputFormat;
 import org.apache.flink.api.java.tuple.*;
@@ -51,6 +52,7 @@ public class Main {
     public static final String COMMAND_WORT_DURCHSCHNITT_SENDER = "wortDurchschnittSender";
     public static final String COMMAND_HAEUFIGKEIT_TYP = "haeufigkeitTyp";
     public static final String COMMAND_NACHRICHTEN_TREND = "nachrichtenTrend";
+    public static final String COMMAND_WORT_ERSTER = "wortErster";
 
     public static void main(String[] args) throws Exception {
         ParameterTool parameter = ParameterTool.fromArgs(args);
@@ -144,6 +146,7 @@ public class Main {
                 break;
             case COMMAND_WORT:
             case COMMAND_WORT_NUTZER:
+            case COMMAND_WORT_ERSTER:
             case COMMAND_WORT_NUTZER_DATUM:
                 String wort = parameter.get("wort");
                 DataSet<Tuple3<String, String, Date>> alleWoerter = nachrichten.flatMap((tuple, out) -> {
@@ -168,6 +171,10 @@ public class Main {
                         DataSet<Tuple3<String, String, Integer>> woerterProNutzer = alleWoerter.map((tuple) -> new Tuple3<String, String, Integer>(tuple.f0, tuple.f1, 1));
                         Pattern wortPattern = Pattern.compile(wort);
                         resultDataset = woerterProNutzer.groupBy(0, 1).sum(2).filter((tuple) -> wortPattern.matcher(tuple.f0).matches());
+                        break;
+                    case COMMAND_WORT_ERSTER:
+                        wortPattern = Pattern.compile(wort);
+                        resultDataset = alleWoerter.filter((tuple) -> wortPattern.matcher(tuple.f0).matches()).reduce((tuple1, tuple2) -> (tuple1.f2.before(tuple2.f2) ? tuple1 : tuple2));
                         break;
                     default:
                         return;
